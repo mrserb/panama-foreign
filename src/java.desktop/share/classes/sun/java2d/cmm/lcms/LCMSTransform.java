@@ -35,6 +35,7 @@
 
 package sun.java2d.cmm.lcms;
 
+import java.awt.color.CMMException;
 import java.awt.color.ColorSpace;
 import java.awt.color.ICC_Profile;
 import java.awt.image.BufferedImage;
@@ -43,12 +44,50 @@ import java.awt.image.DataBuffer;
 import java.awt.image.Raster;
 import java.awt.image.SampleModel;
 import java.awt.image.WritableRaster;
+
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
 import java.lang.ref.Reference;
+import java.util.Optional;
 
 import sun.awt.AWTAccessor;
 import sun.java2d.cmm.ColorTransform;
+import sun.security.action.GetBooleanAction;
+
+import static java.lang.foreign.ValueLayout.*;
+import static sun.java2d.cmm.lcms.LCMSImageLayout.DT_INT;
+import static sun.java2d.cmm.lcms.LCMSImageLayout.DT_SHORT;
 
 final class LCMSTransform implements ColorTransform {
+
+    private static final MethodHandle cmsDoTransformLineStride;
+    private static final String symbolName = "cmsDoTransformLineStride_panama";
+
+    @SuppressWarnings("removal")
+    private static final boolean jni =
+            java.security.AccessController.doPrivileged(
+                    new GetBooleanAction("sun.java2d.cmm.jni"));
+
+    static {
+        if (!jni) {
+            Linker linker = Linker.nativeLinker();
+            SymbolLookup lookup = SymbolLookup.loaderLookup();
+            var signature = FunctionDescriptor.ofVoid(ADDRESS, ADDRESS,
+                                                      ADDRESS,
+                                                      JAVA_INT, JAVA_INT,
+                                                      JAVA_INT, JAVA_INT,
+                                                      JAVA_INT, JAVA_INT);
+            Optional<MemorySegment> symbol = lookup.find(symbolName);
+            if (symbol.isPresent()) {
+                cmsDoTransformLineStride = linker.downcallHandle(symbol.get(),
+                                                                 signature);
+            } else {
+                throw new CMMException(symbolName + " not found");
+            }
+        } else {
+            cmsDoTransformLineStride = null;
+        }
+    }
 
     private static final class NativeTransform {
         private long ID;
@@ -119,11 +158,54 @@ final class LCMSTransform implements ColorTransform {
                 }
             }
         }
-        LCMS.colorConvert(tfm.ID, in.width, in.height, in.offset,
-                          in.nextRowOffset, out.offset, out.nextRowOffset,
-                          in.dataArray, out.dataArray,
-                          in.dataType, out.dataType);
+        if (!jni) {
+            panama(in, out, tfm);
+        } else {
+            // via jni
+            LCMS.colorConvert(tfm.ID, in.width, in.height, in.offset,
+                              in.nextRowOffset, out.offset, out.nextRowOffset,
+                              in.dataArray, out.dataArray,
+                              in.dataType, out.dataType);
+        }
         Reference.reachabilityFence(tfm); // prevent deallocation of "tfm.ID"
+    }
+
+    private static void panama(LCMSImageLayout in, LCMSImageLayout out,
+                               NativeTransform tfm) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment offHeap = arena.allocate(in.dataArrayLength +
+                                                   out.dataArrayLength);
+            var allocator = SegmentAllocator.slicingAllocator(offHeap);
+            MemorySegment srcNative;
+            if (in.dataType == DT_INT) {
+                srcNative = allocator.allocateFrom(JAVA_INT,
+                                                   (int[]) in.dataArray);
+            } else if (in.dataType == DT_SHORT) {
+                srcNative = allocator.allocateFrom(JAVA_SHORT,
+                                                   (short[]) in.dataArray);
+            } else {
+                srcNative = allocator.allocateFrom(JAVA_BYTE,
+                                                   (byte[]) in.dataArray);
+            }
+            MemorySegment dstNative = allocator.allocate(out.dataArrayLength);
+            cmsDoTransformLineStride.invoke(MemorySegment.ofAddress(tfm.ID),
+                                            srcNative.asSlice(in.offset),
+                                            dstNative.asSlice(out.offset),
+                                            in.width, in.height,
+                                            in.nextRowOffset,
+                                            out.nextRowOffset, 0, 0);
+            MemorySegment dst;
+            if (out.dataType == DT_INT) {
+                dst = MemorySegment.ofArray((int[]) out.dataArray);
+            } else if (out.dataType == DT_SHORT) {
+                dst = MemorySegment.ofArray((short[]) out.dataArray);
+            } else {
+                dst = MemorySegment.ofArray((byte[]) out.dataArray);
+            }
+            dst.copyFrom(dstNative);
+        } catch (Throwable e) {
+            throw new CMMException(e.getMessage());
+        }
     }
 
     /**

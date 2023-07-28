@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -496,6 +496,24 @@ static void releaseILData(JNIEnv *env, void *pData, jint type, jobject data,
             (*env)->ReleaseIntArrayElements(env, data, (jint *) pData, mode);
             break;
     }
+}
+
+// don't want export cmsDoTransformLineStride for now
+JNIEXPORT void CMSEXPORT cmsDoTransformLineStride_panama(
+                                              cmsHTRANSFORM Transform,
+                                              const void* InputBuffer,
+                                              void* OutputBuffer,
+                                              cmsUInt32Number PixelsPerLine,
+                                              cmsUInt32Number LineCount,
+                                              cmsUInt32Number BytesPerLineIn,
+                                              cmsUInt32Number BytesPerLineOut,
+                                              cmsUInt32Number BytesPerPlaneIn,
+                                              cmsUInt32Number BytesPerPlaneOut)
+{
+    cmsDoTransformLineStride(Transform, InputBuffer, OutputBuffer,
+                             PixelsPerLine, LineCount, BytesPerLineIn,
+                             BytesPerLineOut, BytesPerPlaneIn,
+                             BytesPerPlaneOut);
 }
 
 /*
